@@ -10,6 +10,13 @@ const SKY_VIEW_BOTTOM = 42;
 const SKY_MIN_LON_SPAN = 18;
 const SKY_MAX_LON_SPAN = 360;
 const SKY_MIN_LAT_SPAN = 12;
+const SKY_TRACK_BASE_STEP_DAYS = 16;
+const SKY_TRACK_MAX_COORDINATE_STEP_DEG = 0.45;
+const SKY_TRACK_MAX_CURVE_ERROR_DEG = 0.08;
+const SKY_TRACK_DISCONTINUITY_DEG = 1;
+const SKY_TRACK_MIN_STEP_DAYS = 1 / 576;
+const SKY_TRACK_MAX_REFINEMENT = 14;
+const SKY_TRACK_MAX_POINTS = 8000;
 const FIXED_OBSERVING_UTC_HOUR = 13;
 const ROTATION_MODE_SPEED_LIMIT = 1;
 const DEFAULT_OBSERVER_LONGITUDE_DEG = 126.978;
@@ -167,6 +174,7 @@ const state = {
   bodyMap: new Map(),
   originalBodies: [],
   originalBodyMap: new Map(),
+  bodyRevision: 0,
   dataSource: "json",
   epochJd: 2451545.0,
   observerId: "earth",
@@ -189,6 +197,7 @@ const state = {
   activePreset: "outer",
   starfieldSolar: makeStars(180, 19),
   starfieldSky: makeSkyStars(620, 47),
+  skyTrackCache: null,
   lastFrame: null
 };
 
@@ -1375,64 +1384,29 @@ function drawNightHorizon(ctx, width, height, bottom) {
 }
 
 function drawApparentTrack(ctx, target, points, projection) {
-  let previous = null;
+  const segments = clippedSkyTrackSegments(points, projection);
 
   ctx.save();
   ctx.strokeStyle = withAlpha(target.color, 0.68);
   ctx.lineWidth = 2;
   ctx.beginPath();
-
-  for (const sample of points) {
-    const point = {
-      x: skyLongitudeToX(sample.lon, projection),
-      y: skyLatitudeToY(sample.lat, projection)
-    };
-    const visible = isSkyPointVisible(point.x, point.y, projection);
-
-    if (!visible) {
-      previous = null;
-    } else if (!previous || Math.abs(point.x - previous.x) > projection.chartW * 0.45) {
-      ctx.moveTo(point.x, point.y);
-    } else {
-      ctx.lineTo(point.x, point.y);
-      previous = point;
-    }
-    if (visible && (!previous || previous.x !== point.x || previous.y !== point.y)) {
-      previous = point;
-    }
+  for (const segment of segments) {
+    ctx.moveTo(segment.from.x, segment.from.y);
+    ctx.lineTo(segment.to.x, segment.to.y);
   }
   ctx.stroke();
   ctx.restore();
 
-  drawTrackDirectionArrow(ctx, points, projection, target.color);
+  drawTrackDirectionArrow(ctx, segments, target.color);
 }
 
-function drawTrackDirectionArrow(ctx, points, projection, color) {
-  if (points.length < 2) return;
-  const endSample = points.at(-1);
-  const end = {
-    x: skyLongitudeToX(endSample.lon, projection),
-    y: skyLatitudeToY(endSample.lat, projection)
-  };
-  if (!isSkyPointVisible(end.x, end.y, projection)) return;
-  let start = null;
-
-  for (let i = points.length - 2; i >= 0; i -= 1) {
-    const sample = points[i];
-    const candidate = {
-      x: skyLongitudeToX(sample.lon, projection),
-      y: skyLatitudeToY(sample.lat, projection)
-    };
-    if (
-      isSkyPointVisible(candidate.x, candidate.y, projection)
-      && Math.abs(end.x - candidate.x) < projection.chartW * 0.45
-      && Math.hypot(end.x - candidate.x, end.y - candidate.y) > 12
-    ) {
-      start = candidate;
-      break;
-    }
-  }
-  if (!start) return;
+function drawTrackDirectionArrow(ctx, segments, color) {
+  const segment = [...segments].reverse().find((item) => (
+    Math.hypot(item.to.x - item.from.x, item.to.y - item.from.y) > 12
+  ));
+  if (!segment) return;
+  const start = segment.from;
+  const end = segment.to;
 
   const angle = Math.atan2(end.y - start.y, end.x - start.x);
   const tip = {
@@ -1455,7 +1429,99 @@ function drawTrackDirectionArrow(ctx, points, projection, color) {
   ctx.restore();
 }
 
+function clippedSkyTrackSegments(points, projection) {
+  const segments = [];
+  if (points.length < 2) return segments;
+
+  const bounds = {
+    left: projection.padX,
+    right: projection.padX + projection.chartW,
+    top: projection.top,
+    bottom: projection.top + projection.chartH
+  };
+
+  for (let index = 1; index < points.length; index += 1) {
+    const start = points[index - 1];
+    const end = points[index];
+    if (end.breakBefore) continue;
+    const endLongitude = unwrapLongitude(end.lon, start.lon);
+    const middleLongitude = (start.lon + endLongitude) / 2;
+    const baseTurn = Math.round((projection.centerLongitude - middleLongitude) / 360);
+
+    for (let turn = baseTurn - 1; turn <= baseTurn + 1; turn += 1) {
+      const shift = turn * 360;
+      const from = {
+        x: skyUnwrappedLongitudeToX(start.lon + shift, projection),
+        y: skyLatitudeToY(start.lat, projection)
+      };
+      const to = {
+        x: skyUnwrappedLongitudeToX(endLongitude + shift, projection),
+        y: skyLatitudeToY(end.lat, projection)
+      };
+      const clipped = clipLineToRect(from, to, bounds);
+      if (clipped) {
+        segments.push({ ...clipped, index });
+      }
+    }
+  }
+
+  return segments;
+}
+
+function clipLineToRect(from, to, bounds) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const p = [-dx, dx, -dy, dy];
+  const q = [
+    from.x - bounds.left,
+    bounds.right - from.x,
+    from.y - bounds.top,
+    bounds.bottom - from.y
+  ];
+  let startRatio = 0;
+  let endRatio = 1;
+
+  for (let index = 0; index < 4; index += 1) {
+    if (Math.abs(p[index]) < 1e-12) {
+      if (q[index] < 0) return null;
+      continue;
+    }
+    const ratio = q[index] / p[index];
+    if (p[index] < 0) {
+      startRatio = Math.max(startRatio, ratio);
+    } else {
+      endRatio = Math.min(endRatio, ratio);
+    }
+    if (startRatio > endRatio) return null;
+  }
+
+  return {
+    from: {
+      x: from.x + dx * startRatio,
+      y: from.y + dy * startRatio
+    },
+    to: {
+      x: from.x + dx * endRatio,
+      y: from.y + dy * endRatio
+    }
+  };
+}
+
 function buildApparentTrack(observer, target, jd) {
+  const cacheKey = usesRotationMode()
+    ? null
+    : [
+      observer.id,
+      target.id,
+      jd.toFixed(8),
+      state.skyCoordinateMode,
+      state.trailDays,
+      state.bodyRevision
+    ].join("|");
+  if (cacheKey && state.skyTrackCache?.key === cacheKey) {
+    return state.skyTrackCache.value;
+  }
+
   const points = [];
   let spanDays;
 
@@ -1468,29 +1534,93 @@ function buildApparentTrack(observer, target, jd) {
     }
   } else {
     spanDays = Math.max(1, Math.min(state.trailDays, currentTrackWindowDays(target, jd)));
-    const stepDays = Math.max(1, Math.ceil(spanDays / 500));
-    const firstJd = jd - Math.floor(spanDays / stepDays) * stepDays;
-    for (let sampleJd = firstJd; sampleJd <= jd + 1e-8; sampleJd += stepDays) {
-      points.push(apparentSkyPoint(observer, target, sampleJd));
-    }
-    if (!points.length || Math.abs(points.at(-1).jd - jd) > 1e-8) {
-      points.push(apparentSkyPoint(observer, target, jd));
+    const startJd = jd - spanDays;
+    const baseSegments = Math.max(1, Math.ceil(spanDays / SKY_TRACK_BASE_STEP_DAYS));
+    const baseStepDays = spanDays / baseSegments;
+    const cache = new Map();
+    const pointAt = (sampleJd) => {
+      const key = sampleJd.toFixed(9);
+      if (!cache.has(key)) {
+        cache.set(key, apparentSkyPoint(observer, target, sampleJd));
+      }
+      return cache.get(key);
+    };
+
+    let start = pointAt(startJd);
+    points.push(start);
+    for (let index = 1; index <= baseSegments; index += 1) {
+      const endJd = index === baseSegments ? jd : startJd + baseStepDays * index;
+      const end = pointAt(endJd);
+      appendAdaptiveSkySegment(points, start, end, pointAt, 0);
+      start = end;
+      if (points.length >= SKY_TRACK_MAX_POINTS) break;
     }
   }
 
-  return { points, spanDays };
+  const track = { points, spanDays };
+  if (cacheKey) {
+    state.skyTrackCache = { key: cacheKey, value: track };
+  }
+  return track;
+}
+
+function appendAdaptiveSkySegment(points, start, end, pointAt, depth) {
+  if (points.length >= SKY_TRACK_MAX_POINTS) return;
+  const duration = end.jd - start.jd;
+  if (duration <= SKY_TRACK_MIN_STEP_DAYS || depth >= SKY_TRACK_MAX_REFINEMENT) {
+    const coordinateStep = skyTrackCoordinateStep(start, end);
+    const discontinuous = start.continuityKey !== end.continuityKey
+      || coordinateStep > SKY_TRACK_DISCONTINUITY_DEG;
+    points.push(discontinuous ? { ...end, breakBefore: true } : end);
+    return;
+  }
+
+  const middle = pointAt((start.jd + end.jd) / 2);
+  const endLongitude = unwrapLongitude(end.lon, start.lon);
+  const middleLongitude = unwrapLongitude(middle.lon, (start.lon + endLongitude) / 2);
+  const coordinateStep = skyTrackCoordinateStep(start, end);
+  const longitudeError = Math.abs(middleLongitude - (start.lon + endLongitude) / 2)
+    * Math.cos(degToRad(clamp(middle.lat, -89, 89)));
+  const latitudeError = Math.abs(middle.lat - (start.lat + end.lat) / 2);
+  const curveError = Math.hypot(longitudeError, latitudeError);
+
+  if (
+    coordinateStep > SKY_TRACK_MAX_COORDINATE_STEP_DEG
+    || curveError > SKY_TRACK_MAX_CURVE_ERROR_DEG
+  ) {
+    appendAdaptiveSkySegment(points, start, middle, pointAt, depth + 1);
+    appendAdaptiveSkySegment(points, middle, end, pointAt, depth + 1);
+  } else {
+    points.push(end);
+  }
+}
+
+function skyTrackCoordinateStep(start, end) {
+  return Math.max(
+    Math.abs(signedAngleDiff(end.lon, start.lon)),
+    Math.abs(end.lat - start.lat)
+  );
 }
 
 function apparentSkyPoint(observer, target, jd) {
   const obsPos = orbitalPosition(observer, jd, state.epochJd);
-  const tarPos = apparentTargetState(observer, target, jd, obsPos).position;
+  const apparentTarget = apparentTargetState(observer, target, jd, obsPos);
+  const tarPos = apparentTarget.position;
   const rel = subVec(tarPos, obsPos);
   const coordinate = skyCoordinatesFromVector(rel, jd, state.skyCoordinateMode);
   return {
     jd,
     lon: displaySkyLongitude(coordinate.longitude, jd, observer),
-    lat: coordinate.latitude
+    lat: coordinate.latitude,
+    continuityKey: skyTrackContinuityKey(observer, target, jd, apparentTarget.emissionJd)
   };
+}
+
+function skyTrackContinuityKey(observer, target, observerJd, targetJd) {
+  const cycle = (body, jd) => body.transfer
+    ? Math.floor((jd - state.epochJd) / transferDurationDays(body))
+    : "continuous";
+  return `${cycle(observer, observerJd)}:${cycle(target, targetJd)}`;
 }
 
 function makeFixedSkyProjection(padX, top, chartW, chartH) {
@@ -2141,6 +2271,8 @@ function updateBodyField(input) {
     }
   }
 
+  state.bodyRevision += 1;
+  state.skyTrackCache = null;
   state.activePreset = null;
   syncPresetButtons();
   render();
@@ -2155,6 +2287,8 @@ function resetSelectedBody() {
     state.bodies[index] = restored;
   }
   state.bodyMap.set(restored.id, restored);
+  state.bodyRevision += 1;
+  state.skyTrackCache = null;
   renderBodyEditor();
   render();
 }
