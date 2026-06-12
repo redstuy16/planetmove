@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>행성 겉보기 운동 시뮬레이터</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="bodies-data.js"></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Apparent Planetary Motion</p>
+          <h1>행성 겉보기 운동 시뮬레이터</h1>
+        </div>
+        <div class="status-pill" id="motionBadge">데이터 로딩</div>
+      </header>
+
+      <section class="workspace">
+        <aside class="control-panel" aria-label="시뮬레이션 조작">
+          <div class="control-group control-observer">
+            <label for="observerSelect">관측자</label>
+            <select id="observerSelect"></select>
+          </div>
+          <div class="control-group control-target">
+            <label for="targetSelect">대상 천체</label>
+            <select id="targetSelect"></select>
+          </div>
+
+          <div class="detail-editor">
+            <div class="editor-header">
+              <span class="control-label" id="detailEditorTitle">대상 세부 수치</span>
+              <button type="button" id="resetBodyButton" class="compact-button">원본값</button>
+            </div>
+            <div class="editor-grid" id="detailEditor"></div>
+          </div>
+
+          <div class="control-group control-scenarios">
+            <span class="control-label">시나리오</span>
+            <div class="preset-grid" id="presetGrid">
+              <button type="button" data-preset="inner">내행성</button>
+              <button type="button" data-preset="outer">외행성</button>
+              <button type="button" data-preset="ellipse">타원 궤도</button>
+              <button type="button" data-preset="innerToOuter">내행성→외행성</button>
+              <button type="button" data-preset="outerToInner">외행성→내행성</button>
+              <button type="button" data-preset="dwarf">왜소행성</button>
+            </div>
+          </div>
+
+          <div class="control-group control-date">
+            <label for="dateInput">시뮬레이션 날짜</label>
+            <div class="inline-row">
+              <input type="date" id="dateInput">
+              <button type="button" id="todayButton" class="compact-button">오늘</button>
+            </div>
+          </div>
+
+          <div class="control-group control-speed">
+            <div class="split-label">
+              <label for="speedRange">시간 배율</label>
+              <output id="speedOutput">0 일/초</output>
+            </div>
+            <input type="range" id="speedRange" min="-60" max="60" value="24">
+          </div>
+
+          <div class="control-group control-trail">
+            <div class="split-label">
+              <label for="trailRange">겉보기 궤적 기간</label>
+              <output id="trailOutput">720일</output>
+            </div>
+            <input type="range" id="trailRange" min="60" max="8000" step="20" value="720">
+          </div>
+
+          <div class="control-group control-range">
+            <label for="rangeSelect">태양계 표시 범위</label>
+            <select id="rangeSelect">
+              <option value="auto">자동</option>
+              <option value="2">내행성권 2 AU</option>
+              <option value="8">목성권 8 AU</option>
+              <option value="35">해왕성권 35 AU</option>
+              <option value="100">왜소행성권 100 AU</option>
+              <option value="900">원거리 천체 900 AU</option>
+            </select>
+          </div>
+
+          <div class="control-group control-overlays">
+            <span class="control-label">태양계 표시 항목</span>
+            <div class="check-grid" id="solarOverlayGrid">
+              <label class="check-field">
+                <input type="checkbox" data-overlay="elongation" checked>
+                <span>이각</span>
+              </label>
+              <label class="check-field">
+                <input type="checkbox" data-overlay="easternMaxElongation" checked>
+                <span>동방 최대 이각</span>
+              </label>
+              <label class="check-field">
+                <input type="checkbox" data-overlay="westernMaxElongation" checked>
+                <span>서방 최대 이각</span>
+              </label>
+              <label class="check-field">
+                <input type="checkbox" data-overlay="opposition" checked>
+                <span>충</span>
+              </label>
+              <label class="check-field">
+                <input type="checkbox" data-overlay="inferiorConjunction" checked>
+                <span>내합</span>
+              </label>
+              <label class="check-field">
+                <input type="checkbox" data-overlay="superiorConjunction" checked>
+                <span>외합 / 합</span>
+              </label>
+              <label class="check-field">
+                <input type="checkbox" data-overlay="easternQuadrature" checked>
+                <span>동구</span>
+              </label>
+              <label class="check-field">
+                <input type="checkbox" data-overlay="westernQuadrature" checked>
+                <span>서구</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="transport-row">
+            <button type="button" id="playButton" class="primary-button">일시정지</button>
+            <button type="button" id="resetTrailButton">기간 기본값</button>
+          </div>
+        </aside>
+
+        <section class="view-grid" aria-label="시뮬레이션 화면">
+          <article class="sim-panel solar-panel">
+            <div class="panel-header">
+              <h2>태양계를 바라본 시점</h2>
+              <span id="solarScaleLabel">자동 스케일</span>
+            </div>
+            <canvas id="solarCanvas" aria-label="태양계 평면 시뮬레이션"></canvas>
+          </article>
+
+          <article class="sim-panel sky-panel">
+            <div class="panel-header">
+              <div>
+                <h2>관측자의 밤하늘 시점</h2>
+                <span id="skyWindowLabel">황도 좌표</span>
+              </div>
+              <div class="sky-header-controls">
+                <label class="follow-toggle" for="followTargetCheckbox">
+                  <input type="checkbox" id="followTargetCheckbox" checked>
+                  <span>행성 따라가기</span>
+                </label>
+                <label class="coordinate-picker" for="skyCoordinateSelect">
+                  <span>세로 좌표</span>
+                  <select id="skyCoordinateSelect">
+                    <option value="ecliptic">황위</option>
+                    <option value="equatorial">적위</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <canvas id="skyCanvas" aria-label="관측자 기준 밤하늘 시뮬레이션"></canvas>
+          </article>
+
+          <section class="phase-section" aria-label="위상도">
+            <div class="section-heading">
+              <h2>행성 위상도</h2>
+              <p id="phaseSummary">대상 천체의 태양빛을 받는 면을 계산 중입니다.</p>
+            </div>
+            <div class="phase-layout">
+              <canvas id="phaseCanvas" aria-label="행성 위상 시뮬레이션"></canvas>
+              <div class="phase-note">
+                <div class="metric-label">계산 원리</div>
+                <p>관측자-대상-태양이 이루는 위상각과 조명률을 이용해 현재 보이는 밝은 면을 표시합니다.</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="metrics-section" aria-label="계산 수치">
+            <div class="section-heading">
+              <h2>계산 수치</h2>
+              <p id="summaryLine">천체 데이터를 불러오는 중입니다.</p>
+            </div>
+            <div class="metrics-grid" id="metricsGrid"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <noscript>이 시뮬레이터는 JavaScript가 필요합니다.</noscript>
+  </body>
+</html>
